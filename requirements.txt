@@ -1,0 +1,5 @@
+torch>=1.5.1
+nltk>=3.5
+torchtext==0.8.0a0+c4a91f2
+scikit-learn==0.23.1
+pandas
