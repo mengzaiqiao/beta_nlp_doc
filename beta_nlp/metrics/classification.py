@@ -29,8 +29,8 @@ class ClsMetric:
 class Precision(ClsMetric):
     """Compute the precision"""
 
-    def __init__(self):
-        ClsMetric.__init__(self, name="precision")
+    def __init__(self, k=2):
+        ClsMetric.__init__(self, name="precision", k=2)
 
     def compute(self, y_true, y_pred, average="binary", **kwargs):
         """Compute the precision score.

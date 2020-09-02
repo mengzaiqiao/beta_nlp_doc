@@ -1,10 +1,196 @@
 import numbers
 import os
+import random
+import time
+import zipfile
+from functools import wraps
 
 import numpy as np
 import pandas as pd
 
+import torch
+from tabulate import tabulate
+
 FLOAT_DTYPES = (np.float64, np.float32, np.float16)
+
+
+def ensureDir(dir_path):
+    """Ensure a dir exist, otherwise create
+
+    Args:
+        dir_path (str): the target dir
+    Return:
+    """
+    if not os.path.exists(dir_path):
+        os.makedirs(dir_path)
+
+
+def update_args(config, args):
+    """Update config parameters by the received parameters from command line
+
+    Args:
+        config (dict): Initial dict of the parameters from JOSN config file.
+        args (object): An argparse Argument object with attributes being the parameters to be updated.
+
+    Returns:
+        None
+    """
+    for k, v in vars(args).items():
+        if v is not None:
+            config[k] = v
+    print_dict_as_table(config, "Received parameters form command line (or default):")
+
+
+def un_zip(file_name, target_dir=None):
+    """Unzip zip files
+
+    Args:
+        file_name (str or Path): zip file path.
+        target_dir (str or Path): target path to be save the unzipped files.
+
+    Returns:
+        None
+
+    """
+    if target_dir is None:
+        target_dir = os.path.dirname(file_name)
+    zip_file = zipfile.ZipFile(file_name)
+    for names in zip_file.namelist():
+        print(f"unzip file {names} ...")
+        zip_file.extract(names, target_dir)
+    zip_file.close()
+
+
+def print_dict_as_table(dic, tag=None, columns=["keys", "values"]):
+    """Print a dictionary as table
+
+    Args:
+        dic (dict): dict object to be formatted.
+        tag (str): A name for this dictionary.
+        columns ([str,str]):  default ["keys", "values"]. columns name for keys and values.
+
+    Returns:
+        None
+
+    """
+    print("-" * 60)
+    if tag is not None:
+        print(tag)
+    df = pd.DataFrame(dic.items(), columns=columns)
+    print(tabulate(df, headers=columns, tablefmt="psql"))
+    print("-" * 60)
+    return tabulate(df, headers=columns, tablefmt="psql")
+
+
+def initialize_folders(base_dir):
+    """Initialize the whole directory structure of the project
+
+    Args:
+        base_dir (str): Root path of the project.
+
+    Returns:
+        None
+    """
+
+    configs = base_dir + "/configs/"
+    datasets = base_dir + "/datasets/"
+    checkpoints = base_dir + "/checkpoints/"
+    results = base_dir + "/results/"
+    logs = base_dir + "/logs/"
+    processes = base_dir + "/processes/"
+    runs = base_dir + "/runs/"
+
+    for dir in [configs, datasets, checkpoints, results, processes, logs, runs]:
+        if not os.path.exists(dir):
+            os.makedirs(dir)
+
+
+def get_random_rep(raw_num, dim):
+    """
+    Generate a random embedding from a normal (Gaussian) distribution.
+    Args:
+        raw_num: Number of raw to be generated.
+        dim: The dimension of the embeddings.
+    Returns:
+        ndarray or scalar
+        Drawn samples from the normal distribution.
+    """
+    return np.random.normal(size=(raw_num, dim))
+
+
+def timeit(method):
+    """Decorator for tracking the execution time for the specific method
+    Args:
+        method: The method need to timeit.
+
+    To use:
+        @timeit
+        def method(self):
+            pass
+    Returns:
+        None
+    """
+
+    @wraps(method)
+    def wrapper(*args, **kw):
+        ts = time.time()
+        result = method(*args, **kw)
+        te = time.time()
+        if "log_time" in kw:
+            name = kw.get("log_name", method.__name__.upper())
+            kw["log_time"][name] = int((te - ts) * 1000)
+        else:
+            print(
+                "Execute [{}] method costing {:2.2f} ms".format(
+                    method.__name__, (te - ts) * 1000
+                )
+            )
+        return result
+
+    return wrapper
+
+
+def save_to_csv(result, result_file):
+    """
+    Save a result dict to disk.
+
+    Args:
+        result: The result dict to be saved.
+        result_file: The file path to be saved.
+
+    Returns:
+        None
+
+    """
+    result_df = pd.DataFrame(result)
+    if os.path.exists(result_file):
+        print(result_file, " already exists, appending result to it")
+        total_result = pd.read_csv(result_file)
+        total_result = total_result.append(result_df)
+    else:
+        print("Create new result_file:", result_file)
+        total_result = result_df
+    total_result.to_csv(result_file, index=False)
+
+
+def set_seed(seed):
+    """
+    Initialize all the seed in the system
+
+    Args:
+        seed: A global random seed.
+
+    Returns:
+        None
+
+    """
+    if type(seed) != int:
+        raise ValueError("Error: seed is invalid type")
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def sigmoid(x):

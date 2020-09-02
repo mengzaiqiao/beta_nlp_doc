@@ -36,6 +36,7 @@ def get_raw_df_data(data_path, filter_in=None, filter_out=None):
         docs.append(doc_string)
     return pd.DataFrame({"docs": docs, "file_name": file_names})
 
+
 def get_raw_promed_data(data_path, filter_in=None, filter_out=None):
     docfiles = [f for f in listdir(data_path) if isfile(join(data_path, f))]
     print(f"found {len(docfiles)} files")
@@ -161,10 +162,10 @@ def biocaser2text(data_file):
         f" number:{len(labels)}"
     )
     label_dic = {
-        "reject": "negative",
-        "publish": "positive",
-        "alert": "positive",
-        "check": "positive",
+        "reject": [0, 1],
+        "publish": [1, 0],
+        "alert": [1, 0],
+        "check": [1, 0],
     }
     labels = [label_dic[label] for label in labels]
     df = pd.DataFrame(list(zip(docs, labels)), columns=["docs", "labels"])
