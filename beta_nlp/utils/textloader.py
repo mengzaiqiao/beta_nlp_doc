@@ -1,7 +1,9 @@
 import csv
 import sys
-import torch
+
 from nltk.tokenize import sent_tokenize
+
+import torch
 from torch.utils.data import DataLoader, RandomSampler, TensorDataset
 
 
@@ -86,6 +88,7 @@ class BertProcessor(object):
                 lines.append(line)
             return lines
 
+
 def _truncate_seq_pair(tokens_a, tokens_b, max_length):
     """
     Truncates a sequence pair in place to the maximum length
@@ -107,6 +110,48 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
             tokens_a.pop()
         else:
             tokens_b.pop()
+
+
+def convert_df_to_dataset(
+    df, tokenizer, max_length, doc_col="docs", label_col="labels", no_label=False
+):
+    docs = df[doc_col].values
+    labels = None
+    if not no_label:
+        labels = df[label_col].values
+    input_ids = []
+    attention_masks = []
+    for doc in docs:
+        # `encode_plus` will:
+        #   (1) Tokenize the sentence.
+        #   (2) Prepend the `[CLS]` token to the start.
+        #   (3) Append the `[SEP]` token to the end.
+        #   (4) Map tokens to their IDs.
+        #   (5) Pad or truncate the sentence to `max_length`
+        #   (6) Create attention masks for [PAD] tokens.
+        encoded_dict = tokenizer.encode_plus(
+            doc,  # Sentence to encode.
+            add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
+            max_length=max_length,  # Pad & truncate all sentences.
+            pad_to_max_length=True,
+            truncation=True,
+            return_attention_mask=True,  # Construct attn. masks.
+            return_tensors="pt",  # Return pytorch tensors.
+        )
+
+        # Add the encoded sentence to the list.
+        input_ids.append(encoded_dict["input_ids"])
+        # And its attention mask (simply differentiates padding from non-padding).
+        attention_masks.append(encoded_dict["attention_mask"])
+    input_ids = torch.cat(input_ids, dim=0)
+    attention_masks = torch.cat(attention_masks, dim=0)
+    if not no_label:
+        labels = torch.tensor(labels)
+        dataset = TensorDataset(input_ids, attention_masks, labels)
+    else:
+        dataset = TensorDataset(input_ids, attention_masks)
+    return dataset
+
 
 def convert_examples_to_features(
     examples, max_seq_length, tokenizer, print_examples=False
@@ -177,7 +222,7 @@ def convert_examples_to_features(
         assert len(input_mask) == max_seq_length
         assert len(segment_ids) == max_seq_length
 
-        label_id = [float(x) for x in example.label]
+        label_id = example.label
 
         if print_examples and ex_index < 5:
             print("tokens: %s" % " ".join([str(x) for x in tokens]))
@@ -195,26 +240,6 @@ def convert_examples_to_features(
             )
         )
     return features
-
-
-def get_train_loader(train_features, batch_size):
-    unpadded_input_ids = [f.input_ids for f in train_features]
-    unpadded_input_mask = [f.input_mask for f in train_features]
-    unpadded_segment_ids = [f.segment_ids for f in train_features]
-
-    padded_input_ids = torch.tensor(unpadded_input_ids, dtype=torch.long)
-    padded_input_mask = torch.tensor(unpadded_input_mask, dtype=torch.long)
-    padded_segment_ids = torch.tensor(unpadded_segment_ids, dtype=torch.long)
-    label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.long)
-
-    train_data = TensorDataset(
-        padded_input_ids, padded_input_mask, padded_segment_ids, label_ids
-    )
-    train_sampler = RandomSampler(train_data)
-    train_dataloader = DataLoader(
-        train_data, sampler=train_sampler, batch_size=batch_size
-    )
-    return train_dataloader
 
 
 def get_test_loader(test_features, batch_size):

@@ -6,15 +6,16 @@ from sklearn import metrics
 from tqdm import tqdm, trange
 
 import torch
-import torch.nn.functional as F
-from beta_nlp.utils.common import print_dict_as_table, timeit, ensureDir
-from beta_nlp.utils.optimization import warmup_linear
-from beta_nlp.utils.textloader import (
-    convert_examples_to_features,
-    get_test_loader,
-    get_train_loader,
+from beta_nlp.utils.common import (
+    ensureDir,
+    print_dict_as_table,
+    print_transformer,
+    timeit,
 )
+from beta_nlp.utils.optimization import warmup_linear
+from beta_nlp.utils.textloader import convert_df_to_dataset
 from munch import munchify
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from transformers import (
     AdamW,
     BertForSequenceClassification,
@@ -44,8 +45,12 @@ class BertModel(object):
 
     def init_bert(self):
         self.model = BertForSequenceClassification.from_pretrained(
-            self.pretrained_model
+            self.pretrained_model,
+            num_labels=self.args.num_labels,
+            output_attentions=False,  # Whether the model returns attentions weights.
+            output_hidden_states=False,
         )
+        print_transformer(self.model)
         self.tokenizer = BertTokenizer.from_pretrained(self.args.tokenizer)
         if self.args.fp16:
             self.model.half()
@@ -136,13 +141,13 @@ class BertModel(object):
         self.model.train()
         for step, batch in enumerate(tqdm(train_dataloader, desc="Training")):
             batch = tuple(t.to(self.args.device) for t in batch)
-            input_ids, input_mask, segment_ids, label_ids = batch
-            logits = self.model(input_ids, input_mask, segment_ids)[0]
-            if self.args.is_multilabel:
-                loss = F.binary_cross_entropy_with_logits(logits, label_ids.float())
-            else:
-                loss = F.cross_entropy(logits, torch.argmax(label_ids, dim=1))
-
+            input_ids, input_mask, label_ids = batch
+            loss, logits = self.model(
+                input_ids,
+                token_type_ids=None,
+                attention_mask=input_mask,
+                labels=label_ids,
+            )
             if self.n_gpu > 1:
                 loss = loss.mean()
             if self.args.gradient_accumulation_steps > 1:
@@ -152,6 +157,9 @@ class BertModel(object):
                 self.optimizer.backward(loss)
             else:
                 loss.backward()
+            # Clip the norm of the gradients to 1.0.
+            # This is to help prevent the "exploding gradients" problem.
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
             self.tr_loss += loss.item()
             self.nb_tr_steps += 1
@@ -168,7 +176,7 @@ class BertModel(object):
                 self.optimizer.zero_grad()
                 self.iterations += 1
 
-    def train(self, train_set, valid_set):
+    def train(self, train_set, dev_set):
         self.iterations, self.nb_tr_steps, self.tr_loss = 0, 0, 0
         self.best_valid_metric, self.unimproved_iters = 0, 0
         self.early_stop = False
@@ -183,15 +191,23 @@ class BertModel(object):
         )
         self.init_optimizer(len(train_set))
 
-        train_features = convert_examples_to_features(
-            train_set, self.args.max_seq_length, self.tokenizer
+        train_dataset = convert_df_to_dataset(
+            train_set, self.tokenizer, self.args.max_seq_length
         )
-        valid_features = convert_examples_to_features(
-            valid_set, self.args.max_seq_length, self.tokenizer
+        dev_dataset = convert_df_to_dataset(
+            dev_set, self.tokenizer, self.args.max_seq_length
         )
 
-        train_dataloader = get_train_loader(train_features, self.args.batch_size)
-        valid_dataloader = get_train_loader(valid_features, self.args.batch_size)
+        train_dataloader = DataLoader(
+            train_dataset,
+            sampler=RandomSampler(train_dataset),
+            batch_size=self.args.batch_size,
+        )
+        dev_dataloader = DataLoader(
+            dev_dataset,
+            sampler=SequentialSampler(dev_dataset),
+            batch_size=self.args.batch_size,
+        )
 
         for epoch in trange(int(self.args.epochs), desc="Epoch"):
             self.train_an_epoch(train_dataloader)
@@ -201,7 +217,7 @@ class BertModel(object):
                 )
             )
             self.tr_loss = 0
-            eval_result = self.eval(valid_dataloader)
+            eval_result = self.eval(dev_dataloader)
             # Update validation results
             if eval_result[self.args.valid_metric] > self.best_valid_metric:
                 self.unimproved_iters = 0
@@ -233,17 +249,22 @@ class BertModel(object):
         Returns:
 
         """
-        test_features = convert_examples_to_features(
-            test_set, self.args.max_seq_length, self.tokenizer
+        test_dataset = convert_df_to_dataset(
+            test_set, self.tokenizer, self.args.max_seq_length
         )
-        eval_dataloader = get_test_loader(test_features, self.args.batch_size)
-        return self.eval(eval_dataloader)
 
-    def scores(self, test_loader):
-        """Get predicted label scores for a test_loader
+        test_dataloader = DataLoader(
+            test_dataset,
+            sampler=SequentialSampler(test_dataset),
+            batch_size=self.args.batch_size,
+        )
+        return self.eval(test_dataloader)
+
+    def scores(self, test_dataloader):
+        """Get predicted label scores for a test_dataloader
 
         Args:
-            test_loader:
+            test_dataloader:
 
         Returns:
             ndarray: An array of predicted label scores.
@@ -251,35 +272,26 @@ class BertModel(object):
         """
         self.model.eval()
         predicted_labels, target_labels = list(), list()
-        for input_ids, input_mask, segment_ids, label_ids in tqdm(
-            test_loader, desc="Evaluating"
+        for input_ids, input_mask, label_ids in tqdm(
+            test_dataloader, desc="Evaluating"
         ):
             input_ids = input_ids.to(self.args.device)
             input_mask = input_mask.to(self.args.device)
-            segment_ids = segment_ids.to(self.args.device)
             label_ids = label_ids.to(self.args.device)
             with torch.no_grad():
-                logits = self.model(input_ids, input_mask, segment_ids)[0]
-            if self.args.is_multilabel:
-                predicted_labels.extend(
-                    torch.sigmoid(logits).round().long().cpu().detach().numpy()
-                )
-                target_labels.extend(label_ids.cpu().detach().numpy())
-            else:
-                predicted_labels.extend(
-                    torch.argmax(logits, dim=1).cpu().detach().numpy()
-                )
-                target_labels.extend(
-                    torch.argmax(label_ids, dim=1).cpu().detach().numpy()
-                )
+                logits = self.model(
+                    input_ids, token_type_ids=None, attention_mask=input_mask
+                )[0]
+            predicted_labels.extend(torch.argmax(logits, dim=1).cpu().detach().numpy())
+            target_labels.extend(label_ids.cpu().detach().numpy())
         return np.array(predicted_labels), np.array(target_labels)
 
     @timeit
-    def eval(self, test_loader):
-        """Get the evaluation performance of a test_loader
+    def eval(self, test_dataloader):
+        """Get the evaluation performance of a test_dataloader
 
         Args:
-            test_loader:
+            test_dataloader:
 
         Returns:
             dict: A result dict containing result of "accuracy"， "precision", "recall"
@@ -287,7 +299,7 @@ class BertModel(object):
 
         """
         # test loader tensor: input_ids, input_mask, segment_ids, label_ids
-        predicted_labels, target_labels = self.scores(test_loader)
+        predicted_labels, target_labels = self.scores(test_dataloader)
 
         if self.args.num_labels > 2:
             accuracy = metrics.accuracy_score(target_labels, predicted_labels)
@@ -346,9 +358,13 @@ class BertModel(object):
         Returns:
             ndarray: An array of predicted label scores.
         """
-        test_features = convert_examples_to_features(
-            test_set, self.args.max_seq_length, self.tokenizer
+        test_dataset = convert_df_to_dataset(
+            test_set, self.tokenizer, self.args.max_seq_length
         )
-        test_dataloader = get_train_loader(test_features, self.args.batch_size)
 
+        test_dataloader = DataLoader(
+            test_dataset,
+            sampler=SequentialSampler(test_dataset),
+            batch_size=self.args.batch_size,
+        )
         return self.scores(test_dataloader)[0]

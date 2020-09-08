@@ -6,8 +6,8 @@ import pandas as pd
 
 from torchtext.data.utils import get_tokenizer
 
-promed_data_path = "/home/zm324/workspace/doc_cls/data/promed_data/"
-extended_promed_data_path = "/home/zm324/workspace/doc_cls/data/promed_extended/"
+promed_data_path = "/home/zm324/workspace/doc_cls/datasets/promed_data/"
+extended_promed_data_path = "/home/zm324/workspace/doc_cls/datasets/promed_extended/"
 
 
 def get_raw_df_data(data_path, filter_in=None, filter_out=None):
@@ -162,10 +162,60 @@ def biocaser2text(data_file):
         f" number:{len(labels)}"
     )
     label_dic = {
-        "reject": [0, 1],
-        "publish": [1, 0],
-        "alert": [1, 0],
-        "check": [1, 0],
+        "reject": 0,
+        "publish": 1,
+        "alert": 1,
+        "check": 1,
+    }
+    labels = [label_dic[label] for label in labels]
+    df = pd.DataFrame(list(zip(docs, labels)), columns=["docs", "labels"])
+    return df
+
+def biocaster2df(data_file):
+    docs = []
+    labels = []
+    ids = []
+    with open(data_file) as f:
+        text_root = "<root>" + f.read() + "</root>".replace("NAMe", "NAME")
+        DOMTree = xml.dom.minidom.parseString(text_root)
+        collection = DOMTree.documentElement
+        docElements = collection.getElementsByTagName("DOC")
+        for docE in docElements:
+            doc_string = ""
+            label = docE.getAttribute("relevancy")
+            #             doc_id = docE.getAttribute("id")
+            if not label:
+                print(docE.tagName)
+            for curNode in docE.childNodes:
+                if curNode.hasChildNodes():
+                    for curNode_child in curNode.childNodes:
+                        if curNode_child.hasChildNodes():
+                            for curNode_child_child in curNode_child.childNodes:
+                                doc_string += curNode_child_child.data
+                                if curNode_child_child.hasChildNodes():
+                                    raise ValueError(
+                                        "Error!!! Shuld have more hasChildNodes"
+                                    )
+                        else:
+                            doc_string += curNode_child.data
+                else:
+                    doc_string += curNode.data
+            docs.append(doc_string.replace("\n\n", "\n"))
+            labels.append(label)
+            #             ids.append(doc_id)
+            if not label:
+                print(doc_string)
+            if len(doc_string) < 10 or docE.getAttribute("DOC"):
+                print(doc_string)
+    print(
+        f"parse biocaser data from {data_file}, docs number:{len(docs)}, lablels"
+        f" number:{len(labels)}"
+    )
+    label_dic = {
+        "reject": 0,
+        "publish": 3,
+        "alert": 2,
+        "check": 1,
     }
     labels = [label_dic[label] for label in labels]
     df = pd.DataFrame(list(zip(docs, labels)), columns=["docs", "labels"])

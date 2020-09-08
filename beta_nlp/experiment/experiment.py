@@ -3,7 +3,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from src.metrics import ClsMetric
+from beta_nlp.metrics import ClsMetric
 
 from ..utils.common import save_to_csv
 from .result import CVExperimentResult, ExperimentResult
