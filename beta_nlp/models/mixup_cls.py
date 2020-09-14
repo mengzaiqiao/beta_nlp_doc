@@ -3,37 +3,131 @@ import random
 
 import numpy as np
 from sklearn import metrics
-from tqdm.auto import tqdm, trange
+from tqdm.auto import tqdm
 
+import gensim
 import torch
-from beta_nlp.utils.common import (
-    ensureDir,
-    print_dict_as_table,
-    print_transformer,
-    timeit,
-)
-from beta_nlp.utils.optimization import warmup_linear
-from beta_nlp.utils.textloader import convert_df_to_dataset
+import torch.nn as nn
+import torch.nn.functional as F
+from beta_nlp.utils.common import ensureDir, get_device, print_dict_as_table, timeit
+from beta_nlp.utils.textloader import convert_df_to_ids
 from munch import munchify
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from transformers import (
-    AdamW,
-    BertForSequenceClassification,
-    BertTokenizer,
-    get_linear_schedule_with_warmup,
-)
+
+embedding_path_dict = {
+    "googlenews": {
+        "path": "../resources/embeddings/GoogleNews-vectors-negative300/GoogleNews-vectors-negative300.bin",
+        "format": "word2vec",
+        "binary": True,
+    },
+    "glove": {
+        "path": "../../resources/embeddings/glove.840B.300d/glove.840B.300d.txt",
+        "format": "glove",
+        "binary": "",
+    },
+    "glove_word2vec": {
+        "path": "../../resources/glove.840B.300d.txt.word2vec",
+        "format": "word2vec",
+        "binary": False,
+    },
+    "wiki": {
+        "path": "../../resources/embeddings/wiki-news-300d-1M/wiki-news-300d-1M.vec",
+        "format": "word2vec",
+        "binary": False,
+    },
+    "paragram": {
+        "path": "../../resources/embeddings/paragram_300_sl999/paragram_300_sl999.txt",
+        "format": "",
+        "binary": False,
+    },
+}
 
 
-class BertModel(object):
-    def __init__(self, config):
+def mixup_data(x, y, device, alpha=1.0):
+
+    """Compute the mixup data. Return mixed inputs, pairs of targets, and lambda"""
+    if alpha > 0.0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1.0
+    batch_size = x.size()[0]
+    index = torch.randperm(batch_size).to(device)
+
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
+
+def mixup_criterion(y_a, y_b, lam):
+    return lambda criterion, pred: lam * criterion(pred, y_a) + (1 - lam) * criterion(
+        pred, y_b
+    )
+
+
+class TextCLS(nn.Module):
+    def __init__(self, vocab_size, embed_dim, num_class, device, dropout, mixup="word"):
+        super().__init__()
+        self.device = device
+        self.mixup = mixup
+        self.embedding = nn.Embedding(vocab_size, embed_dim, sparse=True).to(device)
+        dropout = dropout
+        D = embed_dim
+        Ci = 1
+        Co = 100
+        Ks = [3, 4, 5]
+        self.convs = nn.ModuleList([nn.Conv2d(Ci, Co, (K, D)) for K in Ks])
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(len(Ks) * Co, num_class).to(device)
+
+    def init_weights(self, embedding_list):
+        initrange = 0.5
+        if embedding_list:
+            self.embedding.weight.data = torch.tensor(embedding_list).to(self.device)
+            self.fc.weight.data.uniform_(-initrange, initrange)
+            self.fc.bias.data.zero_()
+        else:
+            self.embedding.weight.data.uniform_(-initrange, initrange)
+            self.fc.weight.data.uniform_(-initrange, initrange)
+            self.fc.bias.data.zero_()
+
+    def forward(self, input_ids, y=None):
+        x = self.embedding(input_ids)  # (N, W, D)
+        if y is not None and self.mixup == "word":
+            x, targets_a, targets_b, lam = mixup_data(x, y, device=input_ids.device)
+        x = x.unsqueeze(1)  # (N, Ci, W, D)
+        x = [
+            F.relu(conv(x)).squeeze(3) for conv in self.convs
+        ]  # [(N, Co, W), ...]*len(Ks)
+        x = [F.max_pool1d(i, i.size(2)).squeeze(2) for i in x]  # [(N, Co), ...]*len(Ks)
+        x = torch.cat(x, 1)
+        x = self.dropout(x)  # (N, len(Ks)*Co)
+        if y is not None and self.mixup == "sentence":
+            x, targets_a, targets_b, lam = mixup_data(x, y, device=input_ids.device)
+        logit = self.fc(x)  # (N, C)
+        if y is not None:
+            return logit, targets_a, targets_b, lam
+        else:
+            return logit
+
+
+class MixupModel(object):
+    def __init__(self, train_set, config):
+        self.build_vocab(train_set)
         self.config = config
         self.init_config()
         self.init_random_seeds()
-        self.init_bert()
+        self.model = TextCLS(
+            self.vocab_size + 1,
+            self.embed_dim,
+            self.args.num_labels,
+            self.device,
+            self.args.dropout,
+        ).to(self.device)
+        self.model.init_weights(self.embedding_list)
 
     def init_config(self):
+        gpu_id, self.config["device"] = get_device(self.config)
         self.args = munchify(self.config)
-        self.pretrained_model = self.args.pretrained_model
         self.device = self.args.device
         self.n_gpu = (
             len(self.args.gpu_ids.split(","))
@@ -43,85 +137,14 @@ class BertModel(object):
         if "gpu_ids" in self.config:
             os.environ["CUDA_VISIBLE_DEVICES"] = self.config["gpu_ids"]
 
-    def init_bert(self):
-        self.model = BertForSequenceClassification.from_pretrained(
-            self.pretrained_model,
-            num_labels=self.args.num_labels,
-            output_attentions=False,  # Whether the model returns attentions weights.
-            output_hidden_states=False,
-        )
-        print_transformer(self.model)
-        self.tokenizer = BertTokenizer.from_pretrained(self.args.tokenizer)
-        if self.args.fp16:
-            self.model.half()
-        self.model.to(self.device)
-        if self.n_gpu > 1:
-            self.model = torch.nn.DataParallel(self.model)
+    def init_weights(self):
+        self.embedding.weight = torch.tensor(self.embedding_list).to(self.device)
+        self.fc.bias.data.zero_()
 
-    def init_optimizer(self, n_examples):
-        num_train_optimization_steps = (
-            int(
-                n_examples
-                / self.args.batch_size
-                / self.args.gradient_accumulation_steps
-            )
-            * self.args.epochs
-        )
-        # Prepare optimizer
-        param_optimizer = list(self.model.named_parameters())
-        no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
-        optimizer_grouped_parameters = [
-            {
-                "params": [
-                    p for n, p in param_optimizer if not any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": 0.01,
-            },
-            {
-                "params": [
-                    p for n, p in param_optimizer if any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": 0.0,
-            },
-        ]
-        if self.args.fp16:
-            try:
-                from apex.optimizers import FP16_Optimizer
-                from apex.optimizers import FusedAdam
-            except ImportError:
-                raise ImportError(
-                    "Please install apex from https://www.github.com/nvidia/apex to use"
-                    " distributed and fp16 training."
-                )
-
-            optimizer = FusedAdam(
-                optimizer_grouped_parameters,
-                lr=self.args.lr,
-                bias_correction=False,
-                max_grad_norm=1.0,
-            )
-            if self.args.loss_scale == 0:
-                self.optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
-            else:
-                self.optimizer = FP16_Optimizer(
-                    optimizer, static_loss_scale=self.args.loss_scale
-                )
-            self.scheduler = get_linear_schedule_with_warmup(
-                self.optimizer,
-                warmup=self.args.warmup_proportion,
-                t_total=num_train_optimization_steps,
-            )
-
-        else:
-            self.optimizer = AdamW(
-                self.model.parameters(), lr=self.args.lr, correct_bias=False
-            )
-            self.scheduler = get_linear_schedule_with_warmup(
-                self.optimizer,
-                num_warmup_steps=num_train_optimization_steps,
-                num_training_steps=self.args.warmup_proportion
-                * num_train_optimization_steps,
-            )
+    def init_optimizer(self,):
+        self.criterion = torch.nn.CrossEntropyLoss().to(self.device)
+        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.args.lr)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, 1, gamma=0.9)
 
     def init_random_seeds(self):
         random.seed(self.args.seed)
@@ -131,50 +154,33 @@ class BertModel(object):
             torch.cuda.manual_seed_all(self.args.seed)
 
     def save_pretrained(self, path):
-        model_to_save = (
-            self.model.module if hasattr(self.model, "module") else self.model
-        )
-        model_to_save.save_pretrained(path)
+        # model_to_save = (
+        #     self.model.module if hasattr(self.model, "module") else self.model
+        # )
+        # model_to_save.save_pretrained(path)
+        pass
 
     @timeit
     def train_an_epoch(self, train_dataloader):
         self.model.train()
+        train_loss, train_acc = 0, 0
         for step, batch in enumerate(tqdm(train_dataloader, desc="Training")):
+            self.optimizer.zero_grad()
             batch = tuple(t.to(self.args.device) for t in batch)
-            input_ids, input_mask, label_ids = batch
-            loss, logits = self.model(
-                input_ids,
-                token_type_ids=None,
-                attention_mask=input_mask,
-                labels=label_ids,
-            )
-            if self.n_gpu > 1:
-                loss = loss.mean()
-            if self.args.gradient_accumulation_steps > 1:
-                loss = loss / self.args.gradient_accumulation_steps
-
-            if self.args.fp16:
-                self.optimizer.backward(loss)
+            input_ids, label_ids = batch
+            if self.args.mixup:
+                output, targets_a, targets_b, lam = self.model(input_ids, label_ids)
+                loss_func = mixup_criterion(targets_a, targets_b, lam)
+                loss = loss_func(self.criterion, output)
             else:
-                loss.backward()
-            # Clip the norm of the gradients to 1.0.
-            # This is to help prevent the "exploding gradients" problem.
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-
-            self.tr_loss += loss.item()
-            self.nb_tr_steps += 1
-            if (step + 1) % self.args.gradient_accumulation_steps == 0:
-                if self.args.fp16:
-                    lr_this_step = self.args.learning_rate * warmup_linear(
-                        self.iterations / self.num_train_optimization_steps,
-                        self.args.warmup_proportion,
-                    )
-                    for param_group in self.optimizer.param_groups:
-                        param_group["lr"] = lr_this_step
-                self.optimizer.step()
-                self.scheduler.step()
-                self.optimizer.zero_grad()
-                self.iterations += 1
+                output = self.model(input_ids)
+                loss = self.criterion(output, label_ids)
+            train_loss += loss.item()
+            loss.backward()
+            self.optimizer.step()
+            train_acc += (output.argmax(1) == label_ids).sum().item()
+        self.scheduler.step()
+        return train_loss / len(train_dataloader), train_acc / len(train_dataloader)
 
     def train(self, train_set, dev_set):
         self.iterations, self.nb_tr_steps, self.tr_loss = 0, 0, 0
@@ -189,14 +195,13 @@ class BertModel(object):
         self.args.batch_size = (
             self.args.batch_size // self.args.gradient_accumulation_steps
         )
-        self.init_optimizer(len(train_set))
+        self.init_optimizer()
 
-        train_dataset = convert_df_to_dataset(
-            train_set, self.tokenizer, self.args.max_seq_length
+        train_dataset = convert_df_to_ids(
+            train_set, self.word2id, self.args.max_seq_length
         )
-        dev_dataset = convert_df_to_dataset(
-            dev_set, self.tokenizer, self.args.max_seq_length
-        )
+
+        dev_dataset = convert_df_to_ids(dev_set, self.word2id, self.args.max_seq_length)
 
         train_dataloader = DataLoader(
             train_dataset,
@@ -209,8 +214,8 @@ class BertModel(object):
             batch_size=self.args.batch_size,
         )
 
-        for epoch in trange(int(self.args.epochs), desc="Epoch"):
-            self.train_an_epoch(train_dataloader)
+        for epoch in tqdm(range(int(self.args.epochs))):
+            self.tr_loss = self.train_an_epoch(train_dataloader)[0]
             tqdm.write(
                 f"[Epoch {epoch}] loss: {self.tr_loss}".format(
                     epoch, self.best_valid_metric
@@ -249,8 +254,8 @@ class BertModel(object):
         Returns:
 
         """
-        test_dataset = convert_df_to_dataset(
-            test_set, self.tokenizer, self.args.max_seq_length
+        test_dataset = convert_df_to_ids(
+            test_set, self.word2id, self.args.max_seq_length
         )
 
         test_dataloader = DataLoader(
@@ -272,16 +277,11 @@ class BertModel(object):
         """
         self.model.eval()
         predicted_labels, target_labels = list(), list()
-        for input_ids, input_mask, label_ids in tqdm(
-            test_dataloader, desc="Evaluating"
-        ):
+        for input_ids, label_ids in tqdm(test_dataloader, desc="Evaluating"):
             input_ids = input_ids.to(self.args.device)
-            input_mask = input_mask.to(self.args.device)
             label_ids = label_ids.to(self.args.device)
             with torch.no_grad():
-                logits = self.model(
-                    input_ids, token_type_ids=None, attention_mask=input_mask
-                )[0]
+                logits = self.model(input_ids,)
             predicted_labels.extend(torch.argmax(logits, dim=1).cpu().detach().numpy())
             target_labels.extend(label_ids.cpu().detach().numpy())
         return np.array(predicted_labels), np.array(target_labels)
@@ -358,8 +358,8 @@ class BertModel(object):
         Returns:
             ndarray: An array of predicted label scores.
         """
-        test_dataset = convert_df_to_dataset(
-            test_set, self.tokenizer, self.args.max_seq_length
+        test_dataset = convert_df_to_ids(
+            test_set, self.word2id, self.args.max_seq_length
         )
 
         test_dataloader = DataLoader(
@@ -368,3 +368,30 @@ class BertModel(object):
             batch_size=self.args.batch_size,
         )
         return self.scores(test_dataloader)[0]
+
+    def build_vocab(self, train_df):
+        self.intialword2vec()
+        self.word2id = {}
+        self.embedding_list = []
+        for idx, row in train_df.iterrows():
+            text = row["docs"].lower()
+            for word in text.split(" "):
+                if word not in self.word2id and word in self.word2vec:
+                    self.word2id[word] = len(self.word2id)
+                    self.embedding_list.append(self.word2vec[word])
+        del self.word2vec
+        self.vocab_size = len(self.word2id)
+        self.embedding_list.append([0] * self.embed_dim)  # pad embedding
+        print(
+            f"Initialize vocab and embedding, vocab_size: {self.vocab_size}, "
+            f" embed_dim：{ self.embed_dim}"
+        )
+
+    def intialword2vec(self, emb_name="googlenews"):
+        emb_path = embedding_path_dict[emb_name]["path"]
+        bin_flag = embedding_path_dict[emb_name]["binary"]
+        model = gensim.models.KeyedVectors.load_word2vec_format(
+            emb_path, binary=bin_flag
+        )
+        self.embed_dim = len(model.wv["word"])
+        self.word2vec = model.wv

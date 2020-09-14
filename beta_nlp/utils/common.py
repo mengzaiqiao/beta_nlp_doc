@@ -8,6 +8,7 @@ from functools import wraps
 import numpy as np
 import pandas as pd
 
+import GPUtil
 import torch
 from tabulate import tabulate
 
@@ -15,7 +16,9 @@ FLOAT_DTYPES = (np.float64, np.float32, np.float16)
 
 
 def ensureDir(dir_path):
-    """Ensure a dir exist, otherwise create
+    """Ensure a dir exist, otherwise c
+
+    reate
 
     Args:
         dir_path (str): the target dir
@@ -45,6 +48,48 @@ def print_transformer(model):
 
     for p in params[-4:]:
         print("{:<55} {:>12}".format(p[0], str(tuple(p[1].size()))))
+
+
+def get_device(config):
+    """
+        Get one gpu id that have the most available memory.
+    Returns:
+        (int, str): The gpu id (None if no available gpu) and the the device string (pytorch style).
+    """
+    if "device" in config:
+        if config["device"] == "cpu":
+            return (None, "cpu")
+        elif "cuda:" in config["device"]:  # receive an string with "cuda:#"
+            return (
+                int(config["device"].replace("cuda:", "")),
+                config["device"],
+            )
+        elif len(config["device"]) < 1:  # receive an int string
+            return (
+                int(config["device"]),
+                "cuda:" + config["device"],
+            )
+
+    gpu_id_list = GPUtil.getAvailable(
+        order="memory", limit=3
+    )  # get the fist gpu with the lowest load
+    if len(gpu_id_list) < 1:
+        gpu_id = None
+        device_str = "cpu"
+    else:
+        gpu_id = gpu_id_list[0]
+        # need to set 0 if ray only specify 1 gpu
+        if "CUDA_VISIBLE_DEVICES" in os.environ:
+            if len(os.environ["CUDA_VISIBLE_DEVICES"].split()) == 1:
+                #  gpu_id = int(os.environ["CUDA_VISIBLE_DEVICES"])
+                gpu_id = 0
+                print("Find only one gpu with id: ", gpu_id)
+                device_str = "cuda:" + str(gpu_id)
+        # print(os.system("nvidia-smi"))
+        else:
+            print("Get a gpu with the most available memory :", gpu_id)
+            device_str = "cuda:" + str(gpu_id)
+    return gpu_id, device_str
 
 
 def update_args(config, args):
@@ -184,6 +229,9 @@ def save_to_csv(result, result_file):
         None
 
     """
+    print_dict_as_table(result)
+    for k, v in result.items():
+        result[k] = [v]
     result_df = pd.DataFrame(result)
     if os.path.exists(result_file):
         print(result_file, " already exists, appending result to it")
@@ -350,25 +398,25 @@ def estimate_batches(input_size, batch_size):
     return int(np.ceil(input_size / batch_size))
 
 
-def save_to_csv(result_df, result_file):
-    """
-    Save a result dict to disk.
-    Args:
-        result: The result dict to be saved.
-        result_file: The file path to be saved.
-    Returns:
-        None
-    """
-    if os.path.exists(result_file):
-        print(result_file, " already exists, appending result to it")
-        total_result = pd.read_csv(result_file)
-        total_result = total_result.append(result_df)
-    else:
-        print("Create new result_file:", result_file)
-        total_result = result_df
-    print("saving result ...")
-    print(result_df)
-    total_result.to_csv(result_file, index=False)
+# def save_to_csv(result_df, result_file):
+#     """
+#     Save a result dict to disk.
+#     Args:
+#         result: The result dict to be saved.
+#         result_file: The file path to be saved.
+#     Returns:
+#         None
+#     """
+#     if os.path.exists(result_file):
+#         print(result_file, " already exists, appending result to it")
+#         total_result = pd.read_csv(result_file)
+#         total_result = total_result.append(result_df)
+#     else:
+#         print("Create new result_file:", result_file)
+#         total_result = result_df
+#     print("saving result ...")
+#     print(result_df)
+#     total_result.to_csv(result_file, index=False)
 
 
 def get_rng(seed):

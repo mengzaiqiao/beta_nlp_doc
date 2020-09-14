@@ -30,7 +30,7 @@ class Precision(ClsMetric):
     """Compute the precision"""
 
     def __init__(self, k=2):
-        ClsMetric.__init__(self, name="precision", k=2)
+        ClsMetric.__init__(self, name="precision", k=k)
 
     def compute(self, y_true, y_pred, average="binary", **kwargs):
         """Compute the precision score.
@@ -67,6 +67,8 @@ class Precision(ClsMetric):
         Returns
             float: precision score.
         """
+        if self.k > 2:
+            average = "macro"
         score = precision_score(y_true, y_pred, average=average)
         return score
 
@@ -74,7 +76,7 @@ class Precision(ClsMetric):
 class Accuracy(ClsMetric):
     """Compute the accuracy score."""
 
-    def __init__(self):
+    def __init__(self, k=2):
         ClsMetric.__init__(self, name="accuracy")
 
     def compute(self, y_true, y_pred, **kwargs):
@@ -96,8 +98,8 @@ class Accuracy(ClsMetric):
 class Recall(ClsMetric):
     """Compute the recall score."""
 
-    def __init__(self):
-        ClsMetric.__init__(self, name="recall")
+    def __init__(self, k=2):
+        ClsMetric.__init__(self, name="recall", k=k)
 
     def compute(self, y_true, y_pred, average="binary", **kwargs):
         """Compute the recall score.
@@ -133,6 +135,8 @@ class Recall(ClsMetric):
         Returns
             float: recall score.
         """
+        if self.k > 2:
+            average = "macro"
         score = recall_score(y_true, y_pred, average=average)
         return score
 
@@ -140,8 +144,8 @@ class Recall(ClsMetric):
 class F1Score(ClsMetric):
     """Compute the F1 score, also known as balanced F-score or F-measure."""
 
-    def __init__(self):
-        ClsMetric.__init__(self, name="f1_score")
+    def __init__(self, k=2):
+        ClsMetric.__init__(self, name="f1_score", k=k)
 
     def compute(self, y_true, y_pred, average="binary", **kwargs):
         """Compute the recall score.
@@ -177,6 +181,8 @@ class F1Score(ClsMetric):
         Returns
             float: f1_score score.
         """
+        if self.k > 2:
+            average = "macro"
         score = f1_score(y_true, y_pred, average=average)
         return score
 
@@ -184,8 +190,8 @@ class F1Score(ClsMetric):
 class RocAuc(ClsMetric):
     """Compute Area Under the Receiver Operating Characteristic Curve (ROC AUC) from prediction scores.."""
 
-    def __init__(self):
-        ClsMetric.__init__(self, name="auc")
+    def __init__(self, k=2):
+        ClsMetric.__init__(self, name="auc", k=k)
 
     def compute(self, y_true, y_pred, average="binary", **kwargs):
         """Compute Area Under the Receiver Operating Characteristic Curve (ROC AUC) from prediction scores..
@@ -221,5 +227,7 @@ class RocAuc(ClsMetric):
         Returns
             float: f1_score score.
         """
+        if self.k > 2:
+            average = "macro"
         score = roc_auc_score(y_true, y_pred, average=average)
         return score

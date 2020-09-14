@@ -37,6 +37,33 @@ def get_raw_df_data(data_path, filter_in=None, filter_out=None):
     return pd.DataFrame({"docs": docs, "file_name": file_names})
 
 
+def split_data(data_df, seed=2020):
+    import random
+    import numpy as np
+
+    random.seed(seed)
+    np.random.seed(seed)
+    from sklearn.utils import shuffle
+
+    data_df = shuffle(data_df).reset_index()
+    data_df["flag"] = None
+    train_index = int(len(data_df.index) * 0.8)
+    valid_index = train_index + round(len(data_df.index) * 0.1)
+    data_df.iloc[:train_index]["flag"] = "train"
+    data_df.iloc[train_index:valid_index]["flag"] = "valid"
+    data_df.iloc[valid_index:]["flag"] = "test"
+    train_set = data_df[data_df["flag"] == "train"]
+    dev_set = data_df[data_df["flag"] == "valid"]
+    test_set = data_df[data_df["flag"] == "test"]
+    import time
+
+    # re-initialize seed with a random number (current time)
+    seed = int(time.time())
+    random.seed(seed)
+    np.random.seed(seed)
+    return train_set, dev_set, test_set
+
+
 def get_raw_promed_data(data_path, filter_in=None, filter_out=None):
     docfiles = [f for f in listdir(data_path) if isfile(join(data_path, f))]
     print(f"found {len(docfiles)} files")
@@ -170,6 +197,7 @@ def biocaser2text(data_file):
     labels = [label_dic[label] for label in labels]
     df = pd.DataFrame(list(zip(docs, labels)), columns=["docs", "labels"])
     return df
+
 
 def biocaster2df(data_file):
     docs = []

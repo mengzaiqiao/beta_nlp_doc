@@ -112,6 +112,35 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
             tokens_b.pop()
 
 
+def convert_df_to_ids(
+    df, word2id, max_seq_length, doc_col="docs", label_col="labels", no_label=False
+):
+    docs = df[doc_col].values
+    labels = None
+    if not no_label:
+        labels = df[label_col].values
+    input_ids = []
+    for doc in docs:
+        ids = []
+        for word in doc.lower().split(" "):
+            if word in word2id:
+                ids.append(word2id[word])
+                if len(ids) == max_seq_length:
+                    break
+        n_pad = max_seq_length - len(ids)
+        # len(word2id) is the pad word, the embedding of which should be 0
+        if n_pad > 0:
+            ids += [len(word2id)] * n_pad
+        input_ids.append(ids)
+    input_ids = torch.tensor(input_ids)
+    if not no_label:
+        labels = torch.tensor(labels)
+        dataset = TensorDataset(input_ids, labels)
+    else:
+        dataset = TensorDataset(input_ids)
+    return dataset
+
+
 def convert_df_to_dataset(
     df, tokenizer, max_length, doc_col="docs", label_col="labels", no_label=False
 ):
