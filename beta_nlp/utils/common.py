@@ -216,6 +216,23 @@ def timeit(method):
 
     return wrapper
 
+def print_dict_as_table(dic, tag=None, columns=["keys", "values"]):
+    """Print a dictionary as table.
+    Args:
+        dic (dict): dict object to be formatted.
+        tag (str): A name for this dictionary.
+        columns ([str,str]):  default ["keys", "values"]. columns name for keys and values.
+    Returns:
+        None
+    """
+    print("-" * 80)
+    if tag is not None:
+        print(tag)
+    df = pd.DataFrame(dic.items(), columns=columns)
+    print(tabulate(df, headers=columns, tablefmt="psql"))
+    print("-" * 80)
+    return tabulate(df, headers=columns, tablefmt="psql")
+
 
 def save_to_csv(result, result_file):
     """

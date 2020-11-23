@@ -1,8 +1,10 @@
 *.ipynb_checkpoints/*
 .idea/
 hedwig/
+backtranslated-imdb/
 results/.ipynb_checkpoints/
 logs/
+torchtext/
 results/
 resources/
 datasets/

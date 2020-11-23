@@ -49,9 +49,9 @@ def split_data(data_df, seed=2020):
     data_df["flag"] = None
     train_index = int(len(data_df.index) * 0.8)
     valid_index = train_index + round(len(data_df.index) * 0.1)
-    data_df.iloc[:train_index]["flag"] = "train"
-    data_df.iloc[train_index:valid_index]["flag"] = "valid"
-    data_df.iloc[valid_index:]["flag"] = "test"
+    data_df.loc[:train_index, "flag"] = "train"
+    data_df.loc[train_index:valid_index, "flag"] = "valid"
+    data_df.loc[valid_index:, "flag"] = "test"
     train_set = data_df[data_df["flag"] == "train"]
     dev_set = data_df[data_df["flag"] == "valid"]
     test_set = data_df[data_df["flag"] == "test"]
@@ -200,6 +200,14 @@ def biocaser2text(data_file):
 
 
 def biocaster2df(data_file):
+    """Load a DataFrame format dataset of biocaster
+
+    Args:
+        data_file: original data file path
+
+    Returns:
+        DataFrame: the loaded dataframe dataset of biocaster
+    """
     docs = []
     labels = []
     ids = []

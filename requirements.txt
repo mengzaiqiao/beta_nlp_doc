@@ -9,3 +9,5 @@ munch==2.5.0
 tqdm==4.48.0
 GPUtil==1.4.0
 ray==0.8.7
+tensorboardX==2.1
+longformer==0.1

@@ -1,6 +1,3 @@
-import os
-from datetime import datetime
-
 import pandas as pd
 
 from beta_nlp.metrics import ClsMetric

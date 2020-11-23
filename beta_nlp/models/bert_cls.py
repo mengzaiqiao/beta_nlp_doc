@@ -2,10 +2,19 @@ import os
 import random
 
 import numpy as np
-from sklearn import metrics
-from tqdm.auto import tqdm, trange
-
 import torch
+import torch.nn.functional as F
+from munch import munchify
+from sklearn import metrics
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from tqdm.auto import tqdm, trange
+from transformers import (
+    AdamW,
+    AutoTokenizer,
+    BertForSequenceClassification,
+    get_linear_schedule_with_warmup,
+)
+
 from beta_nlp.utils.common import (
     ensureDir,
     print_dict_as_table,
@@ -14,14 +23,6 @@ from beta_nlp.utils.common import (
 )
 from beta_nlp.utils.optimization import warmup_linear
 from beta_nlp.utils.textloader import convert_df_to_dataset
-from munch import munchify
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from transformers import (
-    AdamW,
-    BertForSequenceClassification,
-    BertTokenizer,
-    get_linear_schedule_with_warmup,
-)
 
 
 class BertModel(object):
@@ -45,13 +46,10 @@ class BertModel(object):
 
     def init_bert(self):
         self.model = BertForSequenceClassification.from_pretrained(
-            self.pretrained_model,
-            num_labels=self.args.num_labels,
-            output_attentions=False,  # Whether the model returns attentions weights.
-            output_hidden_states=False,
+            self.pretrained_model, num_labels=self.args.num_labels,
         )
         print_transformer(self.model)
-        self.tokenizer = BertTokenizer.from_pretrained(self.args.tokenizer)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.args.tokenizer)
         if self.args.fp16:
             self.model.half()
         self.model.to(self.device)
@@ -86,8 +84,7 @@ class BertModel(object):
         ]
         if self.args.fp16:
             try:
-                from apex.optimizers import FP16_Optimizer
-                from apex.optimizers import FusedAdam
+                from apex.optimizers import FP16_Optimizer, FusedAdam
             except ImportError:
                 raise ImportError(
                     "Please install apex from https://www.github.com/nvidia/apex to use"
@@ -142,21 +139,27 @@ class BertModel(object):
         for step, batch in enumerate(tqdm(train_dataloader, desc="Training")):
             batch = tuple(t.to(self.args.device) for t in batch)
             input_ids, input_mask, label_ids = batch
-            loss, logits = self.model(
-                input_ids,
-                token_type_ids=None,
-                attention_mask=input_mask,
-                labels=label_ids,
-            )
-            if self.n_gpu > 1:
-                loss = loss.mean()
-            if self.args.gradient_accumulation_steps > 1:
-                loss = loss / self.args.gradient_accumulation_steps
-
-            if self.args.fp16:
-                self.optimizer.backward(loss)
+            if self.args.is_multilabel:
+                logits = self.model(
+                    input_ids, token_type_ids=None, attention_mask=input_mask,
+                )[0]
+                loss = F.binary_cross_entropy_with_logits(logits, label_ids.float())
             else:
-                loss.backward()
+                loss, logits = self.model(
+                    input_ids,
+                    token_type_ids=None,
+                    attention_mask=input_mask,
+                    labels=label_ids,
+                )
+                if self.n_gpu > 1:
+                    loss = loss.mean()
+                if self.args.gradient_accumulation_steps > 1:
+                    loss = loss / self.args.gradient_accumulation_steps
+
+                if self.args.fp16:
+                    self.optimizer.backward(loss)
+                else:
+                    loss.backward()
             # Clip the norm of the gradients to 1.0.
             # This is to help prevent the "exploding gradients" problem.
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
@@ -182,8 +185,9 @@ class BertModel(object):
         self.early_stop = False
         if self.args.gradient_accumulation_steps < 1:
             raise ValueError(
-                "Invalid gradient_accumulation_steps parameter: {}, should be >= 1"
-                .format(self.args.gradient_accumulation_steps)
+                "Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
+                    self.args.gradient_accumulation_steps
+                )
             )
 
         self.args.batch_size = (
@@ -282,7 +286,14 @@ class BertModel(object):
                 logits = self.model(
                     input_ids, token_type_ids=None, attention_mask=input_mask
                 )[0]
-            predicted_labels.extend(torch.argmax(logits, dim=1).cpu().detach().numpy())
+            if self.args.is_multilabel:
+                predicted_labels.extend(
+                    F.sigmoid(logits).round().long().cpu().detach().numpy()
+                )
+            else:
+                predicted_labels.extend(
+                    torch.argmax(logits, dim=1).cpu().detach().numpy()
+                )
             target_labels.extend(label_ids.cpu().detach().numpy())
         return np.array(predicted_labels), np.array(target_labels)
 
@@ -331,6 +342,7 @@ class BertModel(object):
                 "micro_recall": micro_recall,
                 "micro_f1": micro_f1,
             }
+
         else:
             accuracy = metrics.accuracy_score(target_labels, predicted_labels)
             precision = metrics.precision_score(

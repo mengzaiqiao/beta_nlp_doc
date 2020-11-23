@@ -1,9 +1,8 @@
 import csv
 import sys
 
-from nltk.tokenize import sent_tokenize
-
 import torch
+from nltk.tokenize import sent_tokenize
 from torch.utils.data import DataLoader, RandomSampler, TensorDataset
 
 
@@ -115,6 +114,19 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
 def convert_df_to_ids(
     df, word2id, max_seq_length, doc_col="docs", label_col="labels", no_label=False
 ):
+    """Convert dataframe to word_ids, label_ids. Lable ids should start from 0.
+
+    Args:
+        df:
+        word2id:
+        max_seq_length:
+        doc_col:
+        label_col:
+        no_label:
+
+    Returns:
+
+    """
     docs = df[doc_col].values
     labels = None
     if not no_label:
@@ -175,7 +187,10 @@ def convert_df_to_dataset(
     input_ids = torch.cat(input_ids, dim=0)
     attention_masks = torch.cat(attention_masks, dim=0)
     if not no_label:
-        labels = torch.tensor(labels)
+        if isinstance(labels[0], list):
+            labels = torch.stack([torch.tensor(label) for label in labels])
+        else:
+            labels = torch.tensor(labels)
         dataset = TensorDataset(input_ids, attention_masks, labels)
     else:
         dataset = TensorDataset(input_ids, attention_masks)

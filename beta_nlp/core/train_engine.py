@@ -5,20 +5,16 @@ import string
 import sys
 from datetime import datetime
 
+from tqdm import tqdm
+
 import GPUtil
 import ray
 import torch
+from beta_nlp.utils import logger
+from beta_nlp.utils.common import ensureDir, print_dict_as_table, set_seed, update_args
+from beta_nlp.utils.constants import MAX_N_UPDATE
 from ray import tune
 from tabulate import tabulate
-from tqdm import tqdm
-
-from beta_nlp.utils import logger
-from beta_nlp.utils.common import (
-    ensureDir,
-    print_dict_as_table,
-    set_seed,
-    update_args,
-)
 
 
 class TrainEngine(object):
@@ -148,9 +144,8 @@ class TrainEngine(object):
 
     def load_dataset(self):
         """Load dataset."""
-        self.data = BaseData(load_split_dataset(self.config))
-        self.config["model"]["n_users"] = self.data.n_users
-        self.config["model"]["n_items"] = self.data.n_items
+        self.data = None
+        pass
 
     def check_early_stop(self, engine, model_dir, epoch):
         """Check if early stop criterion is triggered.
@@ -170,8 +165,9 @@ class TrainEngine(object):
         if self.eval_engine.n_no_update >= MAX_N_UPDATE:
             # stop training if early stop criterion is triggered
             print(
-                "Early stop criterion triggered, no performance update for {:} times"
-                .format(MAX_N_UPDATE)
+                "Early stop criterion triggered, no performance update for {:} times".format(
+                    MAX_N_UPDATE
+                )
             )
             return True
         return False
@@ -226,23 +222,6 @@ class TrainEngine(object):
             )
         )
         print(tabulate(df, headers=df.columns, tablefmt="psql"))
-
-    # def ax_tune(self, runable):
-    #     # todo still cannot runable yet.
-    #     ax = AxClient(enforce_sequential_optimization=False)
-    #     # verbose_logging=False,
-    #     ax.create_experiment(
-    #         name=self.config["model"]["model"],
-    #         parameters=self.config["tunable"],
-    #         objective_name="valid_metric",
-    #     )
-    #     tune.run(
-    #         runable,
-    #         num_samples=30,
-    #         search_alg=AxSearch(ax),  # Note that the argument here is the `AxClient`.
-    #         verbose=2,  # Set this level to 1 to see status updates and to 2 to also see trial results.
-    #         # To use GPU, specify: resources_per_trial={"gpu": 1}.
-    #     )
 
     def test(self):
         """Evaluate the performance for the testing sets based on the final model."""

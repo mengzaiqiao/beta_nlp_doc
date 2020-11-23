@@ -1,8 +1,6 @@
 import time
-from collections import OrderedDict
 
 import numpy as np
-from tqdm.auto import tqdm
 
 from ..utils import get_rng
 
